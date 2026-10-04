@@ -1,0 +1,73 @@
+  PASS  /readyz -> 200
+
+== 1 hot-seat storm (5 seats x 500 users each): 2500 requests in 55.2s (45 req/s)
+     201 confirmed                               5
+     409 seat_taken                           2495
+  PASS  [hot] seat A12: exactly 1x201, 499x409 seat_taken
+  PASS  [hot] seat A13: exactly 1x201, 499x409 seat_taken
+  PASS  [hot] seat A14: exactly 1x201, 499x409 seat_taken
+  PASS  [hot] seat A15: exactly 1x201, 499x409 seat_taken
+  PASS  [hot] seat A16: exactly 1x201, 499x409 seat_taken
+  PASS  [hot] invariant: 195+0+5 == 200
+  PASS  [hot] no seat confirmed to two reservations
+  PASS  [hot] server confirmed=5 == client-observed winners=5
+  PASS  [hot] zero 5xx / 429 / connection errors (got 0)
+
+== 2 stampede (5000 users, 20 hot seats, 10% retries, 3% key conflicts): 20000 requests in 352.7s (57 req/s)
+     0 ClientOSError                             1
+     0 TimeoutError                              4
+     201 confirmed                            1644
+     201 replay                                197
+     409 idempotency_key_conflict              482
+     409 per_user_limit                         19
+     409 per_user_limit (replayed)               3
+     409 seat_taken                          12732
+     409 seat_taken (replayed)                1205
+     429 overloaded                             35
+     502 ?                                    3678
+     !! 5 connection-level failures (no HTTP response). Sample: 
+     !! This is the client/network path, not the app: lower --concurrency (try 200) or raise `ulimit -n`.
+     latency p50=157.27s p99=348.37s max=351.79s
+  PASS  [stampede] invariant: 292+0+1708 == 2000
+  PASS  [stampede] no seat confirmed to two reservations
+  FAIL  [stampede] server confirmed=1708 == client-observed winners=1706
+  FAIL  [stampede] zero 5xx / 429 / connection errors (got 3718)
+  FAIL  [stampede] invariant held on all 226 polls DURING the burst
+
+== 3 per-user limit (1 user x 10 parallel, limit 4): 10 requests
+     201 confirmed                               4
+     409 per_user_limit                          6
+  PASS  [limit] invariant: 46+0+4 == 50
+  PASS  [limit] no seat confirmed to two reservations
+  PASS  [limit] server confirmed=4 == client-observed winners=4
+  PASS  [limit] zero 5xx / 429 / connection errors (got 0)
+  PASS  [limit] exactly 4 confirmed, 6 declined per_user_limit
+  PASS  [limit] the other 6 are clean per_user_limit 409s
+
+== 4 idempotency (same key x20 parallel): 20 requests
+     201 confirmed                               1
+     201 replay                                 19
+  PASS  [idem] 20 parallel same-key requests -> one reservation id, all 201
+  PASS  [idem] exactly one request did the work; 19 were replays
+  PASS  [idem] same key, different seats -> 409 idempotency_key_conflict
+  PASS  [idem] retries and the conflicting request moved nothing extra (confirmed == 1)
+  PASS  [identity] spoofed body user_id ignored; reservation belongs to token user
+  PASS  [identity] non-owner cancel -> 403
+  PASS  [identity] cancel without token -> 401
+  PASS  [identity] garbage token -> 401
+  PASS  [identity] owner cancel -> 200 cancelled
+  PASS  [identity] released seat is cleanly re-bookable by someone else
+  PASS  [identity] re-cancelling the OLD reservation does not resurrect/free carol's seat
+
+== metrics reconciliation (valid only if nothing else hit the service during the run)
+  FAIL  reservations_confirmed_total +1355 == client-observed first-time 201s
+  FAIL  declined{reason=seat_taken} +12021 == client-observed 15227
+  PASS  declined{reason=per_user_limit} +25 == client-observed 25
+  PASS  declined{reason=unknown_seat} +0 == client-observed 0
+  FAIL  declined{reason=key_conflict} +477 == client-observed 483
+  FAIL  declined{reason=idempotent_replay} +1419 == client-observed replays 1424
+  PASS  seats_available gauge (292.0) == GET /shows available (292)  [stampede]
+  PASS  unknown show -> 404
+  FAIL  GLOBAL: zero 5xx/429/conn-errors across 22533 reserve calls
+
+Total 455s. 8 CHECK(S) FAILED
