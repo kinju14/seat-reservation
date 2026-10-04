@@ -24,6 +24,29 @@ from types import SimpleNamespace as NS
 
 import aiohttp
 
+try:
+    import resource
+except ImportError:  # Windows
+    resource = None
+
+
+def fit_concurrency(wanted):
+    """Raise the open-file limit if we can, and cap --concurrency so we never run out of sockets."""
+    if resource is None:
+        return wanted
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = 10240 if hard == resource.RLIM_INFINITY else min(hard, 10240)
+    if soft < target:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        except (ValueError, OSError):
+            pass
+    cap = max(50, soft - 300)
+    if wanted > cap:
+        print(f"note: open-file limit is {soft}; capping --concurrency {wanted} -> {cap}")
+    return min(wanted, cap)
+
 
 def label(i):  # 0->A1 ... 49->A50, 50->B1 ... 1300->AA1
     row, n = divmod(i, 50)
@@ -69,7 +92,7 @@ class Client:
                         data = None
                     return r.status, data, r.headers
             except Exception as e:  # connection reset, timeout... counted as failures (status 0)
-                return 0, {"error": type(e).__name__}, {}
+                return 0, {"error": type(e).__name__, "detail": str(e)[:160]}, {}
 
         if use_sem:
             async with self.sem:
@@ -131,6 +154,10 @@ def show_dist(title, results, secs):
     print(f"\n== {title}: {len(results)} requests{rate}")
     for k, v in sorted(d.items()):
         print(f"     {k:<38}{v:>7}")
+    conn_err = [r for r in results if r.status == 0]
+    if conn_err:
+        print(f"     !! {len(conn_err)} connection-level failures (no HTTP response). Sample: {conn_err[0].body.get('detail')}")
+        print("     !! This is the client/network path, not the app: lower --concurrency (try 200) or raise `ulimit -n`.")
     return d
 
 
@@ -145,6 +172,9 @@ async def state(c, show, seats=False):
 
 async def verify_show(c, chk, show, results, name):
     s = await state(c, show)
+    if "counts" not in s:
+        chk(False, f"[{name}] could not read show state ({s}); skipping verification")
+        return s
     cnt = s["counts"]
     chk(cnt["available"] + cnt["held"] + cnt["confirmed"] == s["total_seats"] and s["invariant_ok"],
         f"[{name}] invariant: {cnt['available']}+{cnt['held']}+{cnt['confirmed']} == {s['total_seats']}")
@@ -330,7 +360,7 @@ async def main():
     ap.add_argument("--concurrency", type=int, default=2000, help="client-side max in-flight requests")
     a = ap.parse_args()
 
-    c, chk, run = Client(a.base_url, a.admin_token, a.concurrency), Checks(), uuid.uuid4().hex[:6]
+    c, chk, run = Client(a.base_url, a.admin_token, fit_concurrency(a.concurrency)), Checks(), uuid.uuid4().hex[:6]
     await c.start()
     r = await c.req("GET", "/readyz")
     chk(r.status == 200, f"/readyz -> {r.status}")
